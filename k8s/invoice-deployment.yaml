@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: invoice-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: invoice
+  template:
+    metadata:
+      labels:
+        app: invoice
+    spec:
+      containers:
+      - name: invoice
+        image: your-dockerhub-username/invoice-service:latest
+        ports:
+        - containerPort: 5000
+        envFrom:
+        - secretRef:
+            name: jwt-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: invoice-service
+spec:
+  selector:
+    app: invoice
+  ports:
+  - port: 5000
+    targetPort: 5000
