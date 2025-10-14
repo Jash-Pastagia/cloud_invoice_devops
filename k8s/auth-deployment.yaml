@@ -20,6 +20,13 @@ spec:
         envFrom:
         - secretRef:
             name: jwt-secret
+        - secretRef:
+            name: db-secret
+        env:
+        - name: PORT
+          value: "4000"
+        - name: NODE_ENV
+          value: "production"
 ---
 apiVersion: v1
 kind: Service

@@ -1,0 +1,119 @@
+# k8s/analytics-deployment.yaml
+# Kubernetes deployment and service for analytics-service
+# Use imagePullPolicy: Never for Minikube/local development
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-service
+  labels:
+    app: analytics-service
+    component: analytics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: analytics-service
+  template:
+    metadata:
+      labels:
+        app: analytics-service
+        component: analytics
+    spec:
+      containers:
+      - name: analytics-service
+        image: cloud-invoice-devops-analytics-service:latest
+        imagePullPolicy: Never  # Use for Minikube/local development
+        ports:
+        - containerPort: 7100
+          name: http
+        env:
+        - name: PORT
+          value: "7100"
+        - name: KAFKA_BROKERS
+          value: "kafka:9092"
+        - name: KAFKA_CONSUMER_GROUP
+          value: "analytics-service-group"
+        - name: TOPICS
+          value: "invoice.created,invoice.paid,payment.processed,payment.initiated"
+        - name: DB_HOST
+          value: "postgres"
+        - name: DB_PORT
+          value: "5432"
+        - name: DB_NAME
+          value: "cloud_invoice"
+        - name: DB_USER
+          value: "dev"
+        - name: DB_PASSWORD
+          value: "devpass"
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 7100
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 7100
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 3
+        # Resource limits
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+      # Init container to wait for dependencies
+      initContainers:
+      - name: wait-for-kafka
+        image: busybox:1.35
+        command: ['sh', '-c', 'until nc -z kafka 9092; do echo waiting for kafka; sleep 2; done;']
+      - name: wait-for-postgres
+        image: busybox:1.35
+        command: ['sh', '-c', 'until nc -z postgres 5432; do echo waiting for postgres; sleep 2; done;']
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-service
+  labels:
+    app: analytics-service
+    component: analytics
+spec:
+  type: ClusterIP
+  ports:
+  - port: 7100
+    targetPort: 7100
+    protocol: TCP
+    name: http
+  selector:
+    app: analytics-service
+
+---
+# Optional: NodePort service for external access during development
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-service-nodeport
+  labels:
+    app: analytics-service
+    component: analytics
+spec:
+  type: NodePort
+  ports:
+  - port: 7100
+    targetPort: 7100
+    nodePort: 30710
+    protocol: TCP
+    name: http
+  selector:
+    app: analytics-service

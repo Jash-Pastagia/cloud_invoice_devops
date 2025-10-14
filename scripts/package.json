@@ -1,0 +1,22 @@
+{
+  "name": "cloud-invoice-scripts",
+  "version": "1.0.0",
+  "description": "Seeding and utility scripts for Cloud Invoice DevOps project",
+  "main": "seed_users.js",
+  "scripts": {
+    "seed-users": "node seed_users.js",
+    "test": "echo \"No tests specified\""
+  },
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "pg": "^8.16.3"
+  },
+  "keywords": [
+    "seeding",
+    "database",
+    "users",
+    "bcrypt"
+  ],
+  "author": "Cloud Invoice Team",
+  "license": "MIT"
+}

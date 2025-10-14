@@ -16,10 +16,19 @@ spec:
       - name: invoice
         image: your-dockerhub-username/invoice-service:latest
         ports:
-        - containerPort: 5000
+        - containerPort: 5050  # Updated port
         envFrom:
         - secretRef:
             name: jwt-secret
+        - secretRef:
+            name: db-secret
+        env:
+        - name: PORT
+          value: "5050"
+        - name: NODE_ENV
+          value: "production"
+        - name: KAFKA_BROKERS
+          value: "kafka:9092"
 ---
 apiVersion: v1
 kind: Service
@@ -29,5 +38,5 @@ spec:
   selector:
     app: invoice
   ports:
-  - port: 5000
-    targetPort: 5000
+  - port: 5050
+    targetPort: 5050
