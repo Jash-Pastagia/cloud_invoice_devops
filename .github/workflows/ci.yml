@@ -19,7 +19,7 @@ on:
 # Environment variables - adjust REGISTRY and IMAGE_PREFIX as needed
 env:
   REGISTRY: ghcr.io
-  IMAGE_PREFIX: ${{ github.repository_owner }}/cloud-invoice
+  IMAGE_PREFIX: ${{ toLower(github.repository_owner) }}/cloud-invoice
   # Set repository secret PUSH_IMAGES=true to enable pushing to registry
   PUSH_IMAGES: ${{ secrets.PUSH_IMAGES || 'false' }}
 
