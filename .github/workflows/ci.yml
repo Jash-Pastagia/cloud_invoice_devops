@@ -154,14 +154,15 @@ jobs:
           # Prefer GHCR_PAT, fallback to GITHUB_TOKEN
           password: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
 
-      # Build Docker image with proper tagging and caching
+      # Build Docker image - multi-platform when pushing, single platform for artifacts
       - name: Build and optionally push Docker image
         id: docker_build
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./${{ matrix.service }}/Dockerfile
-          platforms: ${{ contains(matrix.runner, 'self-hosted') && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          # Multi-platform only when pushing to registry, single platform for local artifacts
+          platforms: ${{ env.PUSH_IMAGES == 'true' && (contains(matrix.runner, 'self-hosted') && 'linux/amd64' || 'linux/amd64,linux/arm64') || 'linux/amd64' }}
           push: ${{ env.PUSH_IMAGES == 'true' }}
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.sha }}
@@ -171,7 +172,8 @@ jobs:
             NODE_ENV=production
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          outputs: type=docker,dest=/tmp/image-${{ matrix.service }}.tar
+          # Only output to file when not pushing (single platform)
+          outputs: ${{ env.PUSH_IMAGES == 'true' && 'type=registry' || 'type=docker,dest=/tmp/image-' }}${{ env.PUSH_IMAGES != 'true' && matrix.service || '' }}${{ env.PUSH_IMAGES != 'true' && '.tar' || '' }}
 
       # Save image as artifact when not pushing to registry
       - name: Save Docker image as artifact
@@ -189,11 +191,12 @@ jobs:
           path: ./${{ matrix.service }}.tar
           retention-days: 7
 
-      # Security scanning with Trivy
+      # Security scanning with Trivy - scan local tar file when not pushing, scan image when pushed
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          input: /tmp/image-${{ matrix.service }}.tar
+          # Scan local tar file when not pushing, scan pushed image when pushing
+          input: ${{ env.PUSH_IMAGES == 'true' && format('{0}/{1}/{2}:{3}', env.REGISTRY, env.IMAGE_PREFIX, matrix.service, github.sha) || format('/tmp/image-{0}.tar', matrix.service) }}
           format: 'sarif'
           output: 'trivy-${{ matrix.service }}.sarif'
         continue-on-error: true
@@ -208,7 +211,8 @@ jobs:
       - name: Generate Trivy JSON report
         uses: aquasecurity/trivy-action@master
         with:
-          input: /tmp/image-${{ matrix.service }}.tar
+          # Scan local tar file when not pushing, scan pushed image when pushing
+          input: ${{ env.PUSH_IMAGES == 'true' && format('{0}/{1}/{2}:{3}', env.REGISTRY, env.IMAGE_PREFIX, matrix.service, github.sha) || format('/tmp/image-{0}.tar', matrix.service) }}
           format: 'json'
           output: 'trivy-${{ matrix.service }}.json'
         continue-on-error: true
