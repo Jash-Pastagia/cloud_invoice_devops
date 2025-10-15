@@ -19,7 +19,8 @@ on:
 # Environment variables - adjust REGISTRY and IMAGE_PREFIX as needed
 env:
   REGISTRY: ghcr.io
-  IMAGE_PREFIX: ${{ toLower(github.repository_owner) }}/cloud-invoice
+  # Hardcode lowercase values to ensure GHCR compliance
+  IMAGE_PREFIX: jash-pastagia/cloud-invoice
   # Set repository secret PUSH_IMAGES=true to enable pushing to registry
   PUSH_IMAGES: ${{ secrets.PUSH_IMAGES || 'false' }}
 
