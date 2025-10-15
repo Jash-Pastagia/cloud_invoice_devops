@@ -1,0 +1,198 @@
+version: '3.8'
+
+# This compose file uses pre-built images from Docker Hub registry
+# instead of building locally. Use this when you want to run the stack
+# with images pushed by the CI pipeline.
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.9.4
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - devnet
+
+  kafka:
+    image: confluentinc/cp-kafka:7.9.4
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,OUTSIDE://localhost:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,OUTSIDE:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - devnet
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: invoicedb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d invoicedb"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - devnet
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    ports:
+      - "8080:8080"
+    depends_on:
+      - kafka
+    networks:
+      - devnet
+
+  auth-service:
+    image: ${DOCKER_REGISTRY:-docker.io}/${DOCKER_REPOSITORY:-techs129/innovative-ci}-auth-service:${IMAGE_TAG:-latest}
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - NODE_ENV=production
+      - JWT_SECRET=supersecretdevops
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=invoicedb
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+    depends_on:
+      - postgres
+    networks:
+      - devnet
+    restart: on-failure
+
+  invoice-service:
+    image: ${DOCKER_REGISTRY:-docker.io}/${DOCKER_REPOSITORY:-techs129/innovative-ci}-invoice-service:${IMAGE_TAG:-latest}
+    ports:
+      - "5050:5050"
+    environment:
+      - PORT=5050
+      - NODE_ENV=production
+      - JWT_SECRET=supersecretdevops
+      - KAFKA_BROKERS=kafka:9092
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=invoicedb
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+    depends_on:
+      - kafka
+      - postgres
+      - auth-service
+    networks:
+      - devnet
+    restart: on-failure
+
+  payment-service:
+    image: ${DOCKER_REGISTRY:-docker.io}/${DOCKER_REPOSITORY:-techs129/innovative-ci}-payment-service:${IMAGE_TAG:-latest}
+    ports:
+      - "6060:6060"
+    environment:
+      - PORT=6060
+      - NODE_ENV=production
+      - JWT_SECRET=supersecretdevops
+      - KAFKA_BROKERS=kafka:9092
+      - INVOICE_URL=http://invoice-service:5050
+    depends_on:
+      - kafka
+      - invoice-service
+    networks:
+      - devnet
+    restart: on-failure
+
+  notification-service:
+    image: ${DOCKER_REGISTRY:-docker.io}/${DOCKER_REPOSITORY:-techs129/innovative-ci}-notification-service:${IMAGE_TAG:-latest}
+    ports:
+      - "7200:7200"
+    environment:
+      - PORT=7200
+      - NODE_ENV=production
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=invoicedb
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - KAFKA_BROKERS=kafka:9092
+      - KAFKA_CONSUMER_GROUP=notification-service-group-v3
+      - TOPICS=invoice.created,invoice.paid,payment.processed,payment.initiated
+    depends_on:
+      - kafka
+      - postgres
+    networks:
+      - devnet
+    restart: on-failure
+
+  analytics-service:
+    image: ${DOCKER_REGISTRY:-docker.io}/${DOCKER_REPOSITORY:-techs129/innovative-ci}-analytics-service:${IMAGE_TAG:-latest}
+    ports:
+      - "7100:7100"
+    environment:
+      - PORT=7100
+      - NODE_ENV=production
+      - KAFKA_BROKERS=kafka:9092
+      - KAFKA_CONSUMER_GROUP=analytics-service-group-v2
+      - TOPICS=invoice.created,invoice.paid,payment.processed,payment.initiated
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=invoicedb
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+    depends_on:
+      - kafka
+      - postgres
+    networks:
+      - devnet
+    restart: on-failure
+
+  frontend:
+    image: ${DOCKER_REGISTRY:-docker.io}/${DOCKER_REPOSITORY:-techs129/innovative-ci}-frontend:${IMAGE_TAG:-latest}
+    ports:
+      - "3000:80"
+    depends_on:
+      - auth-service
+      - invoice-service
+      - payment-service
+      - notification-service
+      - analytics-service
+    networks:
+      - devnet
+    restart: on-failure
+
+networks:
+  devnet:
+    driver: bridge
+
+volumes:
+  postgres_data:

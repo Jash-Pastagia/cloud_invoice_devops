@@ -18,8 +18,10 @@ on:
 
 # Environment variables - adjust REGISTRY and IMAGE_PREFIX as needed
 env:
-  REGISTRY: ghcr.io
-  # Hardcode lowercase values to ensure GHCR compliance
+  # Use docker.io for Docker Hub, ghcr.io for GitHub Container Registry
+  # Set repository secret REGISTRY to override (e.g., "docker.io" or "ghcr.io")
+  REGISTRY: ${{ secrets.REGISTRY || 'docker.io' }}
+  # Hardcode lowercase values to ensure registry compliance
   IMAGE_PREFIX: jash-pastagia/cloud-invoice
   # Set repository secret PUSH_IMAGES=true to enable pushing to registry
   PUSH_IMAGES: ${{ secrets.PUSH_IMAGES || 'false' }}
@@ -78,19 +80,17 @@ jobs:
                 exit 1
               fi
             fi
-            # Use lowercase username as image prefix (Docker Hub requires lowercase repository names)
-            owner_lc=$(echo "${{ secrets.DOCKERHUB_USERNAME }}" | tr '[:upper:]' '[:lower:]' 2>/dev/null || true)
-            if [ -z "$owner_lc" ]; then
-              # if secret is empty or not set, fallback to github.actor lowercased
-              owner_lc=$(echo "${{ github.actor }}" | tr '[:upper:]' '[:lower:]')
-            fi
-            echo "IMAGE_PREFIX=$owner_lc" >> $GITHUB_ENV
-            echo "Using image prefix: $owner_lc"
+            # Use specific repository prefix for Docker Hub
+            # Format: username/repo-service (e.g., techs129/innovative-ci-auth-service)
+            username_lc=$(echo "${{ secrets.DOCKERHUB_USERNAME }}" | tr '[:upper:]' '[:lower:]' 2>/dev/null || echo "${{ github.actor }}" | tr '[:upper:]' '[:lower:]')
+            repo_prefix="${{ secrets.DOCKERHUB_REPOSITORY || 'innovative-ci' }}"
+            echo "IMAGE_PREFIX=$username_lc/$repo_prefix" >> $GITHUB_ENV
+            echo "Using Docker Hub image prefix: $username_lc/$repo_prefix"
           else
             # default GHCR path - force lowercase for safety
             ghcr_prefix=$(echo "${{ env.IMAGE_PREFIX }}" | tr '[:upper:]' '[:lower:]')
             echo "IMAGE_PREFIX=$ghcr_prefix" >> $GITHUB_ENV
-            echo "Using image prefix: $ghcr_prefix"
+            echo "Using GHCR image prefix: $ghcr_prefix"
           fi
 
       - name: Preflight - show planned image tags
@@ -208,9 +208,9 @@ jobs:
           platforms: ${{ env.PUSH_IMAGES == 'true' && (contains(matrix.runner, 'self-hosted') && 'linux/amd64' || 'linux/amd64,linux/arm64') || 'linux/amd64' }}
           push: ${{ env.PUSH_IMAGES == 'true' }}
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:ci-${{ github.run_number }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:ci-${{ github.run_number }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:latest
           build-args: |
             NODE_ENV=production
           cache-from: type=gha
@@ -239,7 +239,7 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           # Scan local tar file when not pushing, scan pushed image when pushing
-          input: ${{ env.PUSH_IMAGES == 'true' && format('{0}/{1}/{2}:{3}', env.REGISTRY, env.IMAGE_PREFIX, matrix.service, github.sha) || format('/tmp/image-{0}.tar', matrix.service) }}
+          input: ${{ env.PUSH_IMAGES == 'true' && format('{0}/{1}-{2}:{3}', env.REGISTRY, env.IMAGE_PREFIX, matrix.service, github.sha) || format('/tmp/image-{0}.tar', matrix.service) }}
           format: 'sarif'
           output: 'trivy-${{ matrix.service }}.sarif'
         continue-on-error: true
@@ -255,7 +255,7 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           # Scan local tar file when not pushing, scan pushed image when pushing
-          input: ${{ env.PUSH_IMAGES == 'true' && format('{0}/{1}/{2}:{3}', env.REGISTRY, env.IMAGE_PREFIX, matrix.service, github.sha) || format('/tmp/image-{0}.tar', matrix.service) }}
+          input: ${{ env.PUSH_IMAGES == 'true' && format('{0}/{1}-{2}:{3}', env.REGISTRY, env.IMAGE_PREFIX, matrix.service, github.sha) || format('/tmp/image-{0}.tar', matrix.service) }}
           format: 'json'
           output: 'trivy-${{ matrix.service }}.json'
         continue-on-error: true
@@ -271,7 +271,7 @@ jobs:
       - name: Generate CI metadata
         id: metadata
         run: |
-          IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}"
+          IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}"
           PRIMARY_TAG="${IMAGE_NAME}:${{ github.sha }}"
           CI_TAG="${IMAGE_NAME}:ci-${{ github.run_number }}"
           LATEST_TAG="${IMAGE_NAME}:latest"
@@ -318,7 +318,7 @@ jobs:
           echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Service | \`${{ matrix.service }}\` |" >> $GITHUB_STEP_SUMMARY  
-          echo "| Image | \`${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Tags | \`${{ github.sha }}\`, \`ci-${{ github.run_number }}\`, \`latest\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Pushed to Registry | ${{ env.PUSH_IMAGES == 'true' && '✅ Yes' || '❌ No (artifact saved)' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Platform(s) | ${{ contains(matrix.runner, 'self-hosted') && 'linux/amd64' || 'linux/amd64, linux/arm64' }} |" >> $GITHUB_STEP_SUMMARY
@@ -330,7 +330,7 @@ jobs:
             echo '```bash' >> $GITHUB_STEP_SUMMARY
             echo "# Download and load the image artifact" >> $GITHUB_STEP_SUMMARY
             echo "docker load -i ${{ matrix.service }}.tar" >> $GITHUB_STEP_SUMMARY
-            echo "docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+            echo "docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
           fi
 
@@ -381,5 +381,5 @@ jobs:
             echo "### 🔧 Testing Instructions" >> $GITHUB_STEP_SUMMARY
             echo "1. Download the desired service image artifact from this workflow run" >> $GITHUB_STEP_SUMMARY
             echo "2. Load it locally: \`docker load -i <service-name>.tar\`" >> $GITHUB_STEP_SUMMARY
-            echo "3. Run with: \`docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/<service>:${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "3. Run with: \`docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-<service>:${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           fi

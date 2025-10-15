@@ -1,0 +1,148 @@
+name: Test Docker Hub Push
+
+# Manual trigger only for testing
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to build and push'
+        required: true
+        default: 'auth-service'
+        type: choice
+        options:
+          - auth-service
+          - invoice-service
+          - payment-service
+          - notification-service
+          - analytics-service
+          - frontend
+
+env:
+  REGISTRY: ${{ secrets.REGISTRY || 'docker.io' }}
+  PUSH_IMAGES: ${{ secrets.PUSH_IMAGES || 'true' }}
+
+jobs:
+  test-push:
+    name: Test Push - ${{ github.event.inputs.service }}
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set image prefix for registry and validate
+        run: |
+          echo "Registry: $REGISTRY"
+          if [ "$REGISTRY" = "docker.io" ]; then
+            if [ "${{ env.PUSH_IMAGES }}" = "true" ]; then
+              if [ -z "${{ secrets.DOCKERHUB_USERNAME }}" ] || [ -z "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+                echo "ERROR: Docker Hub registry selected and PUSH_IMAGES=true but DOCKERHUB_USERNAME/DOCKERHUB_TOKEN secrets are not set"
+                exit 1
+              fi
+            fi
+            username_lc=$(echo "${{ secrets.DOCKERHUB_USERNAME }}" | tr '[:upper:]' '[:lower:]' 2>/dev/null || echo "${{ github.actor }}" | tr '[:upper:]' '[:lower:]')
+            repo_name="${{ secrets.DOCKERHUB_REPOSITORY || 'innovative_ci' }}"
+            image_prefix="${username_lc}/${repo_name}"
+            echo "IMAGE_PREFIX=$image_prefix" >> $GITHUB_ENV
+            echo "Using Docker Hub image prefix: $image_prefix"
+          else
+            ghcr_prefix="jash-pastagia/cloud-invoice"
+            echo "IMAGE_PREFIX=$ghcr_prefix" >> $GITHUB_ENV
+            echo "Using image prefix: $ghcr_prefix"
+          fi
+
+      - name: Preflight - show planned image tags
+        run: |
+          SERVICE="${{ github.event.inputs.service }}"
+          IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/$SERVICE"
+          echo "Planned tags for service: $IMAGE_NAME"
+          echo " - ${IMAGE_NAME}:${{ github.sha }}"
+          echo " - ${IMAGE_NAME}:test-${{ github.run_number }}"
+          echo " - ${IMAGE_NAME}:latest"
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install dependencies
+        working-directory: ${{ github.event.inputs.service }}
+        run: |
+          if [ -f package.json ]; then
+            echo "Installing dependencies for ${{ github.event.inputs.service }}..."
+            if [ -f package-lock.json ]; then
+              echo "Found package-lock.json, using npm ci..."
+              npm ci --prefer-offline --no-audit
+            else
+              echo "No package-lock.json found, using npm install..."
+              npm install --prefer-offline --no-audit
+            fi
+          fi
+
+      - name: Login to Container Registry
+        if: ${{ env.PUSH_IMAGES == 'true' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.REGISTRY == 'docker.io' && secrets.DOCKERHUB_USERNAME || github.actor }}
+          password: ${{ env.REGISTRY == 'docker.io' && secrets.DOCKERHUB_TOKEN || secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Build and push test image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./${{ github.event.inputs.service }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ env.PUSH_IMAGES == 'true' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ github.event.inputs.service }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ github.event.inputs.service }}:test-${{ github.run_number }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ github.event.inputs.service }}:latest
+          build-args: |
+            NODE_ENV=production
+
+      - name: Test image pull
+        if: ${{ env.PUSH_IMAGES == 'true' }}
+        run: |
+          SERVICE="${{ github.event.inputs.service }}"
+          IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/$SERVICE:test-${{ github.run_number }}"
+          echo "Testing pull of: $IMAGE_NAME"
+          docker pull "$IMAGE_NAME"
+          echo "✅ Successfully pulled test image"
+          
+          echo "Image info:"
+          docker inspect "$IMAGE_NAME" --format='{{.Config.Labels}}'
+
+      - name: Generate test summary
+        if: always()
+        run: |
+          SERVICE="${{ github.event.inputs.service }}"
+          IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/$SERVICE"
+          
+          echo "## 🧪 Docker Hub Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | \`$SERVICE\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Registry | \`${{ env.REGISTRY }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${IMAGE_NAME}:test-${{ github.run_number }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Push Status | ${{ env.PUSH_IMAGES == 'true' && '✅ Pushed' || '❌ Not pushed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ env.PUSH_IMAGES }}" = "true" ]; then
+            echo "### 🚀 Image URLs" >> $GITHUB_STEP_SUMMARY
+            if [ "${{ env.REGISTRY }}" = "docker.io" ]; then
+              echo "- Docker Hub: https://hub.docker.com/r/${{ env.IMAGE_PREFIX }}/$SERVICE" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- GHCR: https://github.com/${{ github.repository }}/pkgs/container/$SERVICE" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🧪 Test Commands" >> $GITHUB_STEP_SUMMARY
+            echo '```bash' >> $GITHUB_STEP_SUMMARY
+            echo "docker pull ${IMAGE_NAME}:test-${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+            echo "docker run --rm ${IMAGE_NAME}:test-${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
