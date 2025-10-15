@@ -87,15 +87,22 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: ${{ matrix.service }}/package-lock.json
+          # Only enable npm cache if package-lock.json exists
+          cache: ${{ hashFiles(format('{0}/package-lock.json', matrix.service)) && 'npm' || '' }}
+          cache-dependency-path: ${{ hashFiles(format('{0}/package-lock.json', matrix.service)) && format('{0}/package-lock.json', matrix.service) || '' }}
 
       - name: Install dependencies
         working-directory: ${{ matrix.service }}
         run: |
           if [ -f package.json ]; then
             echo "Installing dependencies for ${{ matrix.service }}..."
-            npm ci --prefer-offline --no-audit
+            if [ -f package-lock.json ]; then
+              echo "Found package-lock.json, using npm ci..."
+              npm ci --prefer-offline --no-audit
+            else
+              echo "No package-lock.json found, using npm install and generating lock file..."
+              npm install --prefer-offline --no-audit
+            fi
           else
             echo "No package.json found for ${{ matrix.service }} - skipping npm install"
           fi

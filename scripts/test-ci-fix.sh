@@ -27,6 +27,15 @@ for service in "${SERVICES[@]}"; do
         continue
     fi
     
+    # Check if package-lock.json exists (for debugging)
+    if [ -f "$service/package.json" ]; then
+        if [ -f "$service/package-lock.json" ]; then
+            echo "  ✅ package-lock.json found"
+        else
+            echo "  ⚠️  package-lock.json missing (will use npm install)"
+        fi
+    fi
+    
     # Test single-platform build (what CI uses for artifacts)
     if docker buildx build \
         --platform linux/amd64 \
