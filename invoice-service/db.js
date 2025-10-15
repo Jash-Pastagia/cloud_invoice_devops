@@ -193,5 +193,15 @@ module.exports = {
   updateInvoiceStatus,
   getInvoiceStats,
   calculateTotalAmount,
+  // check if a user exists (used to validate assignee/creator IDs before inserts)
+  userExists: async function(userId) {
+    const client = await pool.connect();
+    try {
+      const result = await client.query('SELECT 1 FROM users WHERE id = $1 LIMIT 1', [userId]);
+      return result.rowCount > 0;
+    } finally {
+      client.release();
+    }
+  },
   pool
 };

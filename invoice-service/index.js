@@ -115,14 +115,30 @@ app.post('/invoices', authMiddleware, async (req, res) => {
       price: parseFloat(item.price)
     }));
     
+    // Ensure assignee exists
+    const assigneeExists = await db.userExists(assigneeId);
+    if (!assigneeExists) {
+      return res.status(400).json({ message: 'Assignee user not found' });
+    }
+
     // Create invoice in database
-    const invoice = await db.createInvoice({
-      creatorId: req.user.userId,
-      assigneeId: assigneeId,
-      customer: typeof customer === 'string' ? { name: customer } : customer,
-      items: standardizedItems,
-      dueDate: dueDate
-    });
+    let invoice;
+    try {
+      invoice = await db.createInvoice({
+        creatorId: req.user.userId,
+        assigneeId: assigneeId,
+        customer: typeof customer === 'string' ? { name: customer } : customer,
+        items: standardizedItems,
+        dueDate: dueDate
+      });
+    } catch (dbErr) {
+      // Handle foreign key violations gracefully
+      if (dbErr && dbErr.code === '23503') { // foreign key violation
+        console.error('Create invoice FK error:', dbErr.detail || dbErr.message);
+        return res.status(400).json({ message: 'Invalid foreign key reference' });
+      }
+      throw dbErr;
+    }
     
     res.status(201).json(invoice);
     
