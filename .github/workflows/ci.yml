@@ -1,0 +1,337 @@
+name: CI - Build, Test, Scan & Package
+
+# Triggers: Runs on push/PR to main, develop, and feature branches (including current feat/kafka-postgres-notifications)
+# To enable image pushes to registry: Set repository secret PUSH_IMAGES=true
+# To use GHCR: Set repository secret GHCR_PAT with your GitHub Personal Access Token
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'feat/**'  # Includes current feat/kafka-postgres-notifications and other feature branches
+  pull_request:
+    branches:
+      - main
+      - develop
+      - 'feat/**'
+  workflow_dispatch:
+
+# Environment variables - adjust REGISTRY and IMAGE_PREFIX as needed
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/cloud-invoice
+  # Set repository secret PUSH_IMAGES=true to enable pushing to registry
+  PUSH_IMAGES: ${{ secrets.PUSH_IMAGES || 'false' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-scan:
+    name: Build & Test - ${{ matrix.service }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        service:
+          - auth-service
+          - invoice-service
+          - payment-service 
+          - notification-service
+          - analytics-service
+          - frontend
+        runner:
+          - ubuntu-latest
+          # To use self-hosted runners, uncomment and configure:
+          # - self-hosted
+      fail-fast: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Skip QEMU/buildx setup for self-hosted runners (they use local Docker)
+      - name: Set up QEMU for multi-platform builds
+        if: ${{ !contains(matrix.runner, 'self-hosted') }}
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: ${{ !contains(matrix.runner, 'self-hosted') }}
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:buildx-stable-1
+
+      # Cache Docker layers to speed up builds
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ matrix.service }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-${{ matrix.service }}-
+
+      # Cache Node modules per service
+      - name: Cache Node modules for ${{ matrix.service }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.service }}/node_modules
+          key: ${{ runner.os }}-node-${{ matrix.service }}-${{ hashFiles(format('{0}/package-lock.json', matrix.service), format('{0}/package.json', matrix.service)) }}
+          restore-keys: |
+            ${{ runner.os }}-node-${{ matrix.service }}-
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: ${{ matrix.service }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.service }}
+        run: |
+          if [ -f package.json ]; then
+            echo "Installing dependencies for ${{ matrix.service }}..."
+            npm ci --prefer-offline --no-audit
+          else
+            echo "No package.json found for ${{ matrix.service }} - skipping npm install"
+          fi
+
+      # Enhanced test step with proper test discovery and reporting
+      - name: Run tests with coverage
+        working-directory: ${{ matrix.service }}
+        run: |
+          echo "::group::Test Discovery for ${{ matrix.service }}"
+          if [ -f package.json ]; then
+            # Check if test script exists
+            if npm run | grep -q "test"; then
+              echo "✅ Test script found - running tests..."
+              echo "::endgroup::"
+              
+              # Run tests with coverage if jest is configured
+              if [ -f jest.config.js ] || [ -f jest.config.json ] || grep -q "jest" package.json; then
+                echo "Jest configuration detected - running with coverage"
+                npm test -- --coverage --watchAll=false --passWithNoTests
+              else
+                echo "Running standard test script"
+                npm test
+              fi
+              
+              # Upload test results if they exist
+              if [ -d coverage ]; then
+                echo "Test coverage generated"
+              fi
+            else
+              echo "❌ No test script found in package.json"
+              echo "::endgroup::"
+              echo "::warning::No tests found for ${{ matrix.service }}"
+              echo "no tests"
+            fi
+          else
+            echo "No package.json - skipping tests"
+            echo "::endgroup::"
+            echo "no tests"
+          fi
+
+      # Upload test coverage if available
+      - name: Upload test coverage
+        if: hashFiles(format('{0}/coverage/**', matrix.service)) != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.service }}
+          path: ${{ matrix.service }}/coverage/
+
+      # Conditional login to container registry (only when pushing)
+      - name: Login to Container Registry
+        if: ${{ env.PUSH_IMAGES == 'true' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # Prefer GHCR_PAT, fallback to GITHUB_TOKEN
+          password: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+
+      # Build Docker image with proper tagging and caching
+      - name: Build and optionally push Docker image
+        id: docker_build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./${{ matrix.service }}/Dockerfile
+          platforms: ${{ contains(matrix.runner, 'self-hosted') && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          push: ${{ env.PUSH_IMAGES == 'true' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:ci-${{ github.run_number }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:latest
+          build-args: |
+            NODE_ENV=production
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: type=docker,dest=/tmp/image-${{ matrix.service }}.tar
+
+      # Save image as artifact when not pushing to registry
+      - name: Save Docker image as artifact
+        if: ${{ env.PUSH_IMAGES != 'true' }}
+        run: |
+          echo "Saving Docker image for local use..."
+          cp /tmp/image-${{ matrix.service }}.tar ./${{ matrix.service }}.tar
+          ls -lh ./${{ matrix.service }}.tar
+
+      - name: Upload Docker image artifact
+        if: ${{ env.PUSH_IMAGES != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.service }}-image
+          path: ./${{ matrix.service }}.tar
+          retention-days: 7
+
+      # Security scanning with Trivy
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          input: /tmp/image-${{ matrix.service }}.tar
+          format: 'sarif'
+          output: 'trivy-${{ matrix.service }}.sarif'
+        continue-on-error: true
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-${{ matrix.service }}.sarif'
+        continue-on-error: true
+
+      - name: Generate Trivy JSON report
+        uses: aquasecurity/trivy-action@master
+        with:
+          input: /tmp/image-${{ matrix.service }}.tar
+          format: 'json'
+          output: 'trivy-${{ matrix.service }}.json'
+        continue-on-error: true
+
+      - name: Upload Trivy JSON report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-report-${{ matrix.service }}
+          path: trivy-${{ matrix.service }}.json
+
+      # Create and upload CI metadata
+      - name: Generate CI metadata
+        id: metadata
+        run: |
+          IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}"
+          PRIMARY_TAG="${IMAGE_NAME}:${{ github.sha }}"
+          CI_TAG="${IMAGE_NAME}:ci-${{ github.run_number }}"
+          LATEST_TAG="${IMAGE_NAME}:latest"
+          
+          # Create metadata JSON
+          cat > ci-metadata-${{ matrix.service }}.json << EOF
+          {
+            "service": "${{ matrix.service }}",
+            "image": "${PRIMARY_TAG}",
+            "tags": [
+              "${{ github.sha }}",
+              "ci-${{ github.run_number }}",
+              "latest"
+            ],
+            "full_tags": [
+              "${PRIMARY_TAG}",
+              "${CI_TAG}",
+              "${LATEST_TAG}"
+            ],
+            "pushed": ${{ env.PUSH_IMAGES == 'true' }},
+            "registry": "${{ env.REGISTRY }}",
+            "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "git_sha": "${{ github.sha }}",
+            "git_ref": "${{ github.ref }}",
+            "workflow_run": "${{ github.run_number }}"
+          }
+          EOF
+          
+          echo "Generated metadata for ${{ matrix.service }}:"
+          cat ci-metadata-${{ matrix.service }}.json
+
+      - name: Upload CI metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-metadata-${{ matrix.service }}
+          path: ci-metadata-${{ matrix.service }}.json
+
+      # Job summary with build information
+      - name: Generate job summary
+        if: always()
+        run: |
+          echo "## 🐳 Docker Build Summary - ${{ matrix.service }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | \`${{ matrix.service }}\` |" >> $GITHUB_STEP_SUMMARY  
+          echo "| Image | \`${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tags | \`${{ github.sha }}\`, \`ci-${{ github.run_number }}\`, \`latest\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Pushed to Registry | ${{ env.PUSH_IMAGES == 'true' && '✅ Yes' || '❌ No (artifact saved)' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform(s) | ${{ contains(matrix.runner, 'self-hosted') && 'linux/amd64' || 'linux/amd64, linux/arm64' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ env.PUSH_IMAGES }}" != "true" ]; then
+            echo "### 📦 Local Testing" >> $GITHUB_STEP_SUMMARY
+            echo "To test this image locally:" >> $GITHUB_STEP_SUMMARY
+            echo '```bash' >> $GITHUB_STEP_SUMMARY
+            echo "# Download and load the image artifact" >> $GITHUB_STEP_SUMMARY
+            echo "docker load -i ${{ matrix.service }}.tar" >> $GITHUB_STEP_SUMMARY
+            echo "docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # Summary job that runs after all matrix jobs complete
+  build-summary:
+    name: Build Summary
+    needs: build-test-scan
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        
+      - name: Generate build summary
+        run: |
+          echo "## 🚀 CI Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY  
+          echo "**Registry:** \`${{ env.REGISTRY }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Images pushed:** ${{ env.PUSH_IMAGES == 'true' && '✅ Yes' || '❌ No' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 📊 Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | Status | Metadata | Image Artifact |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|---------|----------|----------------|" >> $GITHUB_STEP_SUMMARY
+          
+          for service in auth-service invoice-service payment-service notification-service analytics-service frontend; do
+            if [ -f "ci-metadata-${service}/ci-metadata-${service}.json" ]; then
+              status="✅ Success"
+            else
+              status="❌ Failed"  
+            fi
+            
+            metadata_link="📋 Available"
+            if [ "${{ env.PUSH_IMAGES }}" != "true" ]; then
+              artifact_link="📦 Available"
+            else
+              artifact_link="🚀 Pushed to Registry"
+            fi
+            
+            echo "| \`${service}\` | ${status} | ${metadata_link} | ${artifact_link} |" >> $GITHUB_STEP_SUMMARY
+          done
+          
+          if [ "${{ env.PUSH_IMAGES }}" != "true" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🔧 Testing Instructions" >> $GITHUB_STEP_SUMMARY
+            echo "1. Download the desired service image artifact from this workflow run" >> $GITHUB_STEP_SUMMARY
+            echo "2. Load it locally: \`docker load -i <service-name>.tar\`" >> $GITHUB_STEP_SUMMARY
+            echo "3. Run with: \`docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/<service>:${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
