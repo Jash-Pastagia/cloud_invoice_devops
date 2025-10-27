@@ -12,6 +12,9 @@ RUN npm install
 # Copy source code
 COPY frontend/ ./
 
+# Use K8s API configuration for nginx proxy routing
+RUN cp src/api.k8s.js src/api.js
+
 # Build the application
 RUN npm run build
 

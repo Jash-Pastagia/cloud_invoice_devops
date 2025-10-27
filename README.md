@@ -7,6 +7,7 @@ A cloud-native invoice management system built with microservices architecture, 
 - [Project Overview](#project-overview)
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
+- [🚀 Quick Start (Hybrid kubectl + Docker)](#-quick-start-hybrid-kubectl--docker)
 - [Project Structure](#project-structure)
 - [Local Development with Docker Compose](#local-development-with-docker-compose)
 - [Kubernetes Deployment with Minikube](#kubernetes-deployment-with-minikube)
@@ -58,6 +59,47 @@ This project implements a microservices-based invoice management system with thr
 - **RAM**: Minimum 8GB (16GB recommended)
 - **CPU**: 4+ cores recommended
 - **Disk**: 20GB free space
+
+---
+
+## 🚀 Quick Start (Hybrid kubectl + Docker)
+
+**NEW: Automated setup and deployment with hybrid CD pipeline!**
+
+### For macOS/Linux:
+
+```bash
+# 1. Setup infrastructure (Docker, kind cluster, PostgreSQL, Kafka)
+./setup-infrastructure.sh
+
+# 2. Build and deploy all services
+./e2e-test.sh
+
+# 3. Access the application
+kubectl port-forward svc/frontend 3000:80 -n innovative-ci
+# Open http://localhost:3000
+```
+
+**Time to deployment: ~5 minutes** ⚡
+
+### Documentation:
+
+- **📖 [QUICKSTART.md](QUICKSTART.md)** - 5-minute quick start guide
+- **📚 [HYBRID_CD_SETUP_GUIDE.md](HYBRID_CD_SETUP_GUIDE.md)** - Complete setup and deployment guide
+- **🤖 CI/CD Pipeline** - `.github/workflows/cd.yml` - Automated deployment workflow
+
+### GitHub Actions CD Pipeline:
+
+The project includes a fully automated hybrid CD pipeline that:
+- ✅ Builds all 6 services with Docker
+- ✅ Pushes images to Docker Hub
+- ✅ Deploys to any Kubernetes cluster (via kubectl)
+- ✅ Runs health checks and API tests
+- ✅ No AWS required - works with kind, minikube, or any K8s cluster
+
+See [HYBRID_CD_SETUP_GUIDE.md](HYBRID_CD_SETUP_GUIDE.md) for GitHub Actions setup.
+
+---
 
 ## 📁 Project Structure
 

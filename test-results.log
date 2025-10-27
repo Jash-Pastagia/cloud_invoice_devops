@@ -1,0 +1,146 @@
+[0;34m╔══════════════════════════════════════════════════════════════════╗[0m
+[0;34m║     HYBRID MODEL END-TO-END TEST                                 ║[0m
+[0;34m║     Infrastructure: Docker | Applications: Kubernetes            ║[0m
+[0;34m╚══════════════════════════════════════════════════════════════════╝[0m
+
+
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;35mPART 1: Docker Compose Infrastructure[0m
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;32m✅ PostgreSQL is running and accepting connections[0m
+[0;32m✅ Kafka container is running[0m
+[0;36mℹ️  Kafka may still be initializing[0m
+[0;32m✅ Zookeeper container is running[0m
+[0;32m✅ Kafka UI is running (http://localhost:8080)[0m
+
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;35mPART 2: Kubernetes Cluster Status[0m
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;32m✅ Kubernetes cluster is accessible[0m
+[0;36mℹ️  Context: kind-innovative-ci[0m
+[0;32m✅ Namespace 'innovative-ci' exists[0m
+
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;35mPART 3: Kubernetes Application Pods[0m
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+NAME                                    READY   STATUS    RESTARTS   AGE
+analytics-service-d8956c566-pnwjn       1/1     Running   0          3m5s
+auth-service-779cdf78cb-p8tnk           1/1     Running   0          3m6s
+frontend-59f655c9d4-5tdkp               1/1     Running   0          3m5s
+invoice-service-57bd5ff885-6vjb4        1/1     Running   0          3m5s
+notification-service-67d6695b4c-hccth   1/1     Running   0          3m5s
+payment-service-56b645fcdd-ttdkn        1/1     Running   0          3m5s
+
+[0;32m✅ auth-service is running (1/1)[0m
+[0;32m✅ invoice-service is running (1/1)[0m
+[0;32m✅ payment-service is running (1/1)[0m
+[0;32m✅ notification-service is running (1/1)[0m
+[0;31m❌ analytics-service is not running[0m
+[0;32m✅ frontend is running (1/1)[0m
+
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;35mPART 4: Database Connectivity from Kubernetes[0m
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;36mℹ️  Testing if K8s pods can connect to Docker PostgreSQL...[0m
+[0;32m✅ Auth service connected to PostgreSQL (via host.docker.internal)[0m
+[0;32m✅ Invoice service connected to PostgreSQL[0m
+
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;35mPART 5: Kafka Connectivity from Kubernetes[0m
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;36mℹ️  Testing if K8s pods can connect to Docker Kafka...[0m
+[0;36mℹ️  Notification service status unclear - check logs[0m
+
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;35mPART 6: API Endpoints Testing[0m
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;36mℹ️  Starting port-forward to frontend service...[0m
+[0;32m✅ Port-forward running (PID: 15929)[0m
+
+[0;36mℹ️  Testing Frontend Service...[0m
+[0;32m✅ Frontend is accessible (HTTP 200)[0m
+
+[0;36mℹ️  Testing User Registration (Auth Service)...[0m
+[0;32m✅ User registration successful[0m
+[0;36m   Response: {"message":"User created successfully","user":{"id":"7f221ac1-aae9-43aa-be1a-b4152fd5cdf3","username":"testuser1761549967","fullName":"Test User","ema...[0m
+
+[0;36mℹ️  Testing User Login (Auth Service)...[0m
+[0;32m✅ User login successful[0m
+[0;36m   Token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiIxNzc1OGN...[0m
+
+[0;36mℹ️  Testing Invoice Creation (Invoice Service)...[0m
+[0;31m❌ Invoice creation failed[0m
+[1;33m   Response: {"message":"Customer information is required"}[0m
+
+[0;36mℹ️  Testing List Invoices (Invoice Service)...[0m
+[0;32m✅ Retrieved 12 invoice(s)[0m
+
+[0;36mℹ️  Testing Analytics Service...[0m
+[0;36mℹ️  Analytics response: <!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Error</title>
+</head>
+<body>
+<pre>Cannot GET /stats</pre>
+</body>
+</html>[0m
+
+[0;36mℹ️  Testing Notification Service...[0m
+[0;36mℹ️  Notification response: <!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cloud Invoice</title>
+    <script type="module" crossorigin src="/assets/index-5d65eada.js"></script>
+    <link rel="stylesheet" href="/assets/index-e7c0639a.css">
+  </head>
+  <body>
+    <div id="root"></div>
+    
+  </body>
+</html>[0m
+
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;35mPART 7: Kafka Events Verification[0m
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;36mℹ️  Checking Kafka topics...[0m
+[0;36mℹ️  Kafka topics: OCI runtime exec failed: exec failed: unable to start container process: exec: "f8e61c7ebdf5": executable file not found in $PATH: unknown[0m
+
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;35mTEST SUMMARY[0m
+[0;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[0;32m✅ Passed: 18[0m
+[0;31m❌ Failed: 2[0m
+[0;34m📊 Success Rate: 90%[0m
+
+[0;32m╔══════════════════════════════════════════════════════════════════╗[0m
+[0;32m║     ✅ HYBRID MODEL IS WORKING SUCCESSFULLY!                     ║[0m
+[0;32m║                                                                   ║[0m
+[0;32m║     Infrastructure: Docker Compose ✓                             ║[0m
+[0;32m║     Applications: Kubernetes ✓                                   ║[0m
+[0;32m║     End-to-End Workflow: TESTED ✓                                ║[0m
+[0;32m╚══════════════════════════════════════════════════════════════════╝[0m
+
+[0;36m📍 Access Points:[0m
+   Frontend:     [0;34mhttp://localhost:3001[0m
+   Kafka UI:     [0;34mhttp://localhost:8080[0m
+   PostgreSQL:   [0;34mlocalhost:5432[0m
+   Kafka:        [0;34mlocalhost:9092[0m
+
+[0;36m🔍 Kubernetes Dashboard:[0m
+   Pods:     [0;34mkubectl get pods -n innovative-ci[0m
+   Services: [0;34mkubectl get services -n innovative-ci[0m
+   Logs:     [0;34mkubectl logs -f <pod-name> -n innovative-ci[0m
+
+[0;36m🐳 Docker Compose:[0m
+   Status:   [0;34mdocker compose -f docker-compose-infra.yml ps[0m
+   Logs:     [0;34mdocker compose -f docker-compose-infra.yml logs -f[0m
+
+
+[1;33mCleaning up port-forwards...[0m

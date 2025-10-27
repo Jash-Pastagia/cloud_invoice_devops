@@ -28,14 +28,10 @@ const Invoices = () => {
   useEffect(() => {
     fetchInvoices()
     // In a real app, you'd have an endpoint to get all users for the assignee dropdown
-    // For now, we'll use hardcoded users that match the actual seeded user UUIDs
+    // For now, we'll use the actual user IDs from the database
     setAvailableUsers([
-      { id: '3e7addf7-d427-4444-8fe8-0a9b53568975', username: 'demo', fullName: 'Demo User' },
-      { id: '5a0138f5-bf5e-4039-a3fd-6eb7151fbf17', username: 'user2', fullName: 'User Two' },
-      { id: 'c84bdf35-d37f-468d-9ca4-561f12493736', username: 'alice', fullName: 'Alice' },
-      { id: '0bc1a168-b166-4be8-88f0-971d33e94d1e', username: 'bob', fullName: 'Bob' },
-      { id: '89834327-1c2e-43b6-809c-8156fdb85156', username: 'carol', fullName: 'Carol' },
-      { id: '634ea157-6e78-49da-a92e-7eaa48285efb', username: 'david', fullName: 'David' }
+      { id: '17758ccf-d2d6-4fcb-b323-45016ee8a42b', username: 'demo', fullName: 'Demo User' },
+      { id: '453e6a35-335b-4b8c-96a6-d471549474cb', username: 'user2', fullName: 'Test User 2' }
     ])
   }, [filter])
 

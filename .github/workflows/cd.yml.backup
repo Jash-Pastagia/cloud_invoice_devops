@@ -1,0 +1,345 @@
+name: CD - Continuous Deployment (Hybrid: kubectl + Docker)
+
+# Hybrid deployment approach using kubectl and Docker Hub
+# - Builds Docker images and pushes to registry
+# - Uses kubectl to deploy to Kubernetes cluster (kind, k3s, or any K8s cluster)
+# - No cloud provider dependency (AWS-free)
+# - Works with self-hosted runners or any K8s cluster accessible via kubectl
+
+on:
+  push:
+    branches:
+      - main
+      - feat/kafka-postgres-notifications
+    paths:
+      - 'auth-service/**'
+      - 'invoice-service/**'
+      - 'payment-service/**'
+      - 'notification-service/**'
+      - 'analytics-service/**'
+      - 'frontend/**'
+      - 'k8s/**'
+      - '.github/workflows/cd.yml'
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to deploy (or "all")'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - auth-service
+          - invoice-service
+          - payment-service
+          - notification-service
+          - analytics-service
+          - frontend
+      skip_tests:
+        description: 'Skip tests (faster deployment)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  DOCKER_REGISTRY: 'docker.io'
+  DOCKER_USERNAME: 'techs129'
+  NAMESPACE: 'innovative-ci'
+  KUBECONFIG_PATH: '${{ github.workspace }}/kubeconfig'
+
+jobs:
+  determine-environment:
+    name: Determine Target Environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      deploy-all: ${{ steps.set-env.outputs.deploy-all }}
+    
+    steps:
+      - name: Set Environment
+        id: set-env
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+            if [ "${{ github.event.inputs.service }}" == "all" ]; then
+              echo "deploy-all=true" >> $GITHUB_OUTPUT
+            else
+              echo "deploy-all=false" >> $GITHUB_OUTPUT
+            fi
+          elif [ "${{ github.event_name }}" == "release" ]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "deploy-all=true" >> $GITHUB_OUTPUT
+          else
+            echo "environment=dev" >> $GITHUB_OUTPUT
+            echo "deploy-all=true" >> $GITHUB_OUTPUT
+          fi
+
+  deploy-infrastructure-services:
+    name: Deploy Infrastructure Services
+    needs: determine-environment
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.determine-environment.outputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Create Namespace
+        run: |
+          kubectl create namespace innovative-ci --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply Secrets
+        run: |
+          # Update JWT_SECRET from GitHub Secrets
+          kubectl create secret generic app-secrets \
+            --from-literal=jwt-secret=${{ secrets.JWT_SECRET || 'supersecretdevops' }} \
+            --namespace=innovative-ci \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy PostgreSQL (if not using RDS)
+        if: needs.determine-environment.outputs.environment == 'dev'
+        run: |
+          kubectl apply -f k8s/postgresql-deployment.yaml -n innovative-ci || true
+
+      - name: Deploy Kafka & Zookeeper (if not using MSK)
+        if: needs.determine-environment.outputs.environment == 'dev'
+        run: |
+          kubectl apply -f k8s/kafka-deployment.yaml -n innovative-ci || true
+          kubectl apply -f k8s/zookeeper-deployment.yaml -n innovative-ci || true
+
+      - name: Wait for Infrastructure
+        run: |
+          echo "Waiting for infrastructure services to be ready..."
+          sleep 30
+
+  deploy-services:
+    name: Deploy Application Services
+    needs: [determine-environment, deploy-infrastructure-services]
+    runs-on: ubuntu-latest
+    if: needs.determine-environment.outputs.deploy-all == 'true' || github.event.inputs.service != 'all'
+    environment:
+      name: ${{ needs.determine-environment.outputs.environment }}
+    strategy:
+      matrix:
+        service: 
+          - auth-service
+          - invoice-service
+          - payment-service
+          - notification-service
+          - analytics-service
+          - frontend
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check if service should be deployed
+        id: check-service
+        run: |
+          if [ "${{ github.event.inputs.service }}" == "all" ] || [ "${{ github.event.inputs.service }}" == "${{ matrix.service }}" ] || [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "deploy=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure AWS Credentials
+        if: steps.check-service.outputs.deploy == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        if: steps.check-service.outputs.deploy == 'true'
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Get Latest Image Tag
+        if: steps.check-service.outputs.deploy == 'true'
+        id: image
+        run: |
+          # Use commit SHA as tag for traceability
+          echo "tag=sha-$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Update Deployment Image
+        if: steps.check-service.outputs.deploy == 'true'
+        run: |
+          SERVICE_NAME="${{ matrix.service }}"
+          IMAGE_TAG="${{ steps.image.outputs.tag }}"
+          
+          # Find the deployment file
+          if [ -f "k8s/${SERVICE_NAME}-deployment.yaml" ]; then
+            DEPLOYMENT_FILE="k8s/${SERVICE_NAME}-deployment.yaml"
+          elif [ "$SERVICE_NAME" == "auth-service" ]; then
+            DEPLOYMENT_FILE="k8s/auth-deployment.yaml"
+          elif [ "$SERVICE_NAME" == "invoice-service" ]; then
+            DEPLOYMENT_FILE="k8s/invoice-deployment.yaml"
+          elif [ "$SERVICE_NAME" == "payment-service" ]; then
+            DEPLOYMENT_FILE="k8s/payment-deployment.yaml"
+          elif [ "$SERVICE_NAME" == "notification-service" ]; then
+            DEPLOYMENT_FILE="k8s/notification-deployment.yaml"
+          elif [ "$SERVICE_NAME" == "analytics-service" ]; then
+            DEPLOYMENT_FILE="k8s/analytics-deployment.yaml"
+          elif [ "$SERVICE_NAME" == "frontend" ]; then
+            DEPLOYMENT_FILE="k8s/frontend-deployment.yaml"
+          fi
+          
+          # Apply the deployment with updated image
+          kubectl apply -f "$DEPLOYMENT_FILE" -n innovative-ci
+
+      - name: Wait for Rollout
+        if: steps.check-service.outputs.deploy == 'true'
+        run: |
+          SERVICE_NAME="${{ matrix.service }}"
+          DEPLOYMENT_NAME="${SERVICE_NAME%-service}"
+          
+          kubectl rollout status deployment/${DEPLOYMENT_NAME} -n innovative-ci --timeout=5m
+
+      - name: Verify Deployment
+        if: steps.check-service.outputs.deploy == 'true'
+        run: |
+          SERVICE_NAME="${{ matrix.service }}"
+          DEPLOYMENT_NAME="${SERVICE_NAME%-service}"
+          
+          kubectl get deployment ${DEPLOYMENT_NAME} -n innovative-ci
+          kubectl get pods -l app=${DEPLOYMENT_NAME} -n innovative-ci
+
+  health-check:
+    name: Health Check
+    needs: [determine-environment, deploy-services]
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.determine-environment.outputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Check Pod Health
+        run: |
+          echo "## Deployment Health Check" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | Status | Ready | Restarts |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|--------|-------|----------|" >> $GITHUB_STEP_SUMMARY
+          
+          for service in auth invoice payment notification analytics frontend; do
+            POD_STATUS=$(kubectl get pods -n innovative-ci -l app=${service} -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "NotFound")
+            READY=$(kubectl get pods -n innovative-ci -l app=${service} -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
+            RESTARTS=$(kubectl get pods -n innovative-ci -l app=${service} -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo "0")
+            
+            echo "| ${service} | ${POD_STATUS} | ${READY} | ${RESTARTS} |" >> $GITHUB_STEP_SUMMARY
+          done
+
+      - name: Test API Endpoints
+        run: |
+          # Get the ingress URL
+          INGRESS_URL=$(kubectl get ingress -n innovative-ci -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "localhost")
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### API Health Tests" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Test auth service
+          AUTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${INGRESS_URL}/api/auth/health || echo "000")
+          echo "- Auth Service: HTTP ${AUTH_STATUS}" >> $GITHUB_STEP_SUMMARY
+          
+          # Test invoice service
+          INVOICE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${INGRESS_URL}/api/invoice/health || echo "000")
+          echo "- Invoice Service: HTTP ${INVOICE_STATUS}" >> $GITHUB_STEP_SUMMARY
+          
+          # Test payment service
+          PAYMENT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${INGRESS_URL}/api/payment/health || echo "000")
+          echo "- Payment Service: HTTP ${PAYMENT_STATUS}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Get Service URLs
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🌐 Service URLs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          INGRESS_URL=$(kubectl get ingress -n innovative-ci -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending...")
+          
+          echo "- **Frontend**: http://${INGRESS_URL}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Auth API**: http://${INGRESS_URL}/api/auth" >> $GITHUB_STEP_SUMMARY
+          echo "- **Invoice API**: http://${INGRESS_URL}/api/invoice" >> $GITHUB_STEP_SUMMARY
+          echo "- **Payment API**: http://${INGRESS_URL}/api/payment" >> $GITHUB_STEP_SUMMARY
+
+  rollback-on-failure:
+    name: Rollback on Failure
+    needs: [determine-environment, deploy-services, health-check]
+    runs-on: ubuntu-latest
+    if: failure()
+    environment:
+      name: ${{ needs.determine-environment.outputs.environment }}
+    
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Rollback Deployments
+        run: |
+          for service in auth invoice payment notification analytics frontend; do
+            echo "Rolling back ${service}..."
+            kubectl rollout undo deployment/${service} -n innovative-ci || true
+          done
+
+      - name: Rollback Summary
+        run: |
+          echo "## ⚠️ Deployment Failed - Rollback Initiated" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All services have been rolled back to the previous version." >> $GITHUB_STEP_SUMMARY
+          echo "Please check the logs and fix issues before redeploying." >> $GITHUB_STEP_SUMMARY
+
+  notify-deployment:
+    name: Notify Deployment Status
+    needs: [determine-environment, health-check]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Deployment Summary
+        run: |
+          if [ "${{ needs.health-check.result }}" == "success" ]; then
+            echo "## ✅ Deployment Successful" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Environment: **${{ needs.determine-environment.outputs.environment }}**" >> $GITHUB_STEP_SUMMARY
+            echo "Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "Deployed by: @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Environment: **${{ needs.determine-environment.outputs.environment }}**" >> $GITHUB_STEP_SUMMARY
+            echo "Please check the logs for details." >> $GITHUB_STEP_SUMMARY
+          fi

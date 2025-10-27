@@ -1,0 +1,74 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seed-data-job
+  namespace: default
+  labels:
+    app: database
+    component: seed-data
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: database
+        component: seed-data
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: seed-data
+        image: node:24-alpine
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "🔄 Starting seed data process..."
+          
+          # Copy script files to working directory
+          cp /seed-script/* /app/
+          cd /app
+          
+          # Install dependencies
+          echo "📦 Installing Node.js dependencies..."
+          npm install --production --silent
+          
+          # Run seed script
+          echo "🌱 Running seed script..."
+          npm start
+        env:
+        - name: DB_HOST
+          value: "postgresql"
+        - name: DB_PORT
+          value: "5432"
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: DB_USER
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: DB_PASSWORD
+        - name: DB_NAME
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: DB_NAME
+        volumeMounts:
+        - name: seed-script
+          mountPath: /seed-script
+          readOnly: true
+        workingDir: /app
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: seed-script
+        configMap:
+          name: seed-script

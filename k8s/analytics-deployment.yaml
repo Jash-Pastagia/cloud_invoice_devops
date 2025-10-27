@@ -22,45 +22,40 @@ spec:
     spec:
       containers:
       - name: analytics-service
-        image: cloud-invoice-devops-analytics-service:latest
-        imagePullPolicy: Never  # Use for Minikube/local development
+        image: techs129/innovative-ci-analytics-service:latest
         ports:
         - containerPort: 7100
           name: http
+        envFrom:
+        - secretRef:
+            name: app-secrets
         env:
         - name: PORT
           value: "7100"
-        - name: KAFKA_BROKERS
-          value: "kafka:9092"
+        - name: DB_HOST
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: DB_HOST
         - name: KAFKA_CONSUMER_GROUP
-          value: "analytics-service-group"
+          value: "analytics-service-group-v2"
         - name: TOPICS
           value: "invoice.created,invoice.paid,payment.processed,payment.initiated"
-        - name: DB_HOST
-          value: "postgres"
-        - name: DB_PORT
-          value: "5432"
-        - name: DB_NAME
-          value: "cloud_invoice"
-        - name: DB_USER
-          value: "dev"
-        - name: DB_PASSWORD
-          value: "devpass"
         # Health checks
         livenessProbe:
           httpGet:
-            path: /health
+            path: /
             port: 7100
-          initialDelaySeconds: 30
+          initialDelaySeconds: 60
           periodSeconds: 30
           timeoutSeconds: 10
           failureThreshold: 3
         readinessProbe:
           httpGet:
-            path: /health
+            path: /
             port: 7100
-          initialDelaySeconds: 10
-          periodSeconds: 5
+          initialDelaySeconds: 30
+          periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
         # Resource limits
@@ -71,14 +66,6 @@ spec:
           requests:
             memory: "256Mi"
             cpu: "250m"
-      # Init container to wait for dependencies
-      initContainers:
-      - name: wait-for-kafka
-        image: busybox:1.35
-        command: ['sh', '-c', 'until nc -z kafka 9092; do echo waiting for kafka; sleep 2; done;']
-      - name: wait-for-postgres
-        image: busybox:1.35
-        command: ['sh', '-c', 'until nc -z postgres 5432; do echo waiting for postgres; sleep 2; done;']
 
 ---
 apiVersion: v1

@@ -45,7 +45,7 @@ async function init() {
 async function createUser({ username, password, fullName, email }) {
   const client = await pool.connect();
   try {
-    // Use plain text password for simplicity
+    // Store plain text password for simplicity
     const passwordHash = password;
     
     const result = await client.query(

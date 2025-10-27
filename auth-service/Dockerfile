@@ -7,19 +7,16 @@ RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt
 COPY auth-service/package*.json ./
 # Clean install without using host node_modules or package-lock
 RUN rm -rf node_modules package-lock.json || true
+RUN npm cache clean --force
 RUN npm install --production
+# Rebuild bcrypt to ensure it matches the container's architecture
+RUN npm rebuild bcrypt --build-from-source
 
 COPY auth-service/ .
 
-# Environment variables
+# Environment variables - only defaults, will be overridden by K8s secrets
 ENV PORT=4000
 ENV NODE_ENV=production
-ENV JWT_SECRET=supersecretdevops
-ENV DB_HOST=postgres
-ENV DB_PORT=5432
-ENV DB_NAME=invoicedb
-ENV DB_USER=postgres
-ENV DB_PASSWORD=postgres
 
 EXPOSE 4000
 CMD ["node", "index.js"]

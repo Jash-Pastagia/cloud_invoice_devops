@@ -1,0 +1,359 @@
+name: DevSecOps - Security Scanning & Quality Gates
+
+# Comprehensive security and quality scanning pipeline
+# Runs on every push and PR to ensure code quality and security
+
+on:
+  push:
+    branches: [main, develop, 'feat/**']
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Run daily security scans
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Code Quality Analysis
+  code-quality:
+    name: Code Quality & Linting
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install dependencies for all services
+        run: |
+          for service in auth-service invoice-service payment-service notification-service analytics-service frontend; do
+            if [ -f "$service/package.json" ]; then
+              echo "Installing dependencies for $service..."
+              cd $service
+              npm ci --prefer-offline --no-audit || npm install --prefer-offline --no-audit
+              cd ..
+            fi
+          done
+
+      - name: Run ESLint
+        run: |
+          for service in auth-service invoice-service payment-service notification-service analytics-service; do
+            if [ -f "$service/package.json" ]; then
+              echo "Linting $service..."
+              cd $service
+              npx eslint . --ext .js,.jsx --max-warnings 50 || true
+              cd ..
+            fi
+          done
+        continue-on-error: true
+
+      - name: Check for console.log statements
+        run: |
+          echo "Checking for console.log statements in production code..."
+          grep -r "console.log" --include="*.js" --include="*.jsx" --exclude-dir=node_modules --exclude-dir=test --exclude-dir=tests . || echo "No console.log found"
+        continue-on-error: true
+
+  # Secret Scanning
+  secret-scanning:
+    name: Secret Detection
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: TruffleHog Secret Scanning
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --only-verified --json
+        continue-on-error: true
+
+      - name: Gitleaks Secret Scanning
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+  # Dependency Scanning
+  dependency-scan:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [auth-service, invoice-service, payment-service, notification-service, analytics-service, frontend]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Run npm audit
+        working-directory: ${{ matrix.service }}
+        run: |
+          if [ -f package.json ]; then
+            echo "Running npm audit for ${{ matrix.service }}..."
+            npm audit --audit-level=high --production || true
+          fi
+        continue-on-error: true
+
+      - name: Snyk Security Scan
+        if: ${{ secrets.SNYK_TOKEN }}
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+          command: test
+        continue-on-error: true
+
+  # SAST - Static Application Security Testing
+  sast-codeql:
+    name: CodeQL Security Analysis
+    runs-on: ubuntu-latest
+    
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ['javascript']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  # Container Security Scanning
+  container-scan:
+    name: Container Security - ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [auth-service, invoice-service, payment-service, notification-service, analytics-service, frontend]
+      fail-fast: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image for scanning
+        run: |
+          docker build -t ${{ matrix.service }}:scan -f ${{ matrix.service }}/Dockerfile .
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ matrix.service }}:scan
+          format: 'sarif'
+          output: 'trivy-${{ matrix.service }}.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-${{ matrix.service }}.sarif'
+        continue-on-error: true
+
+      - name: Trivy JSON report
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ matrix.service }}:scan
+          format: 'json'
+          output: 'trivy-${{ matrix.service }}.json'
+
+      - name: Upload Trivy JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report-${{ matrix.service }}
+          path: trivy-${{ matrix.service }}.json
+
+      - name: Grype vulnerability scan
+        uses: anchore/scan-action@v3
+        id: grype-scan
+        with:
+          image: ${{ matrix.service }}:scan
+          fail-build: false
+          severity-cutoff: high
+        continue-on-error: true
+
+      - name: Upload Grype SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: ${{ steps.grype-scan.outputs.sarif }}
+        continue-on-error: true
+
+  # Dockerfile Best Practices
+  dockerfile-lint:
+    name: Dockerfile Linting - ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [auth-service, invoice-service, payment-service, notification-service, analytics-service, frontend]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Hadolint Dockerfile Linting
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: ${{ matrix.service }}/Dockerfile
+          failure-threshold: warning
+        continue-on-error: true
+
+  # License Compliance
+  license-scan:
+    name: License Compliance Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install license-checker
+        run: npm install -g license-checker
+
+      - name: Check licenses
+        run: |
+          for service in auth-service invoice-service payment-service notification-service analytics-service frontend; do
+            if [ -f "$service/package.json" ]; then
+              echo "Checking licenses for $service..."
+              cd $service
+              npm ci --prefer-offline || npm install --prefer-offline
+              license-checker --summary --production --exclude 'MIT,Apache-2.0,BSD-3-Clause,ISC,BSD-2-Clause' || true
+              cd ..
+            fi
+          done
+        continue-on-error: true
+
+  # Infrastructure Security (Terraform)
+  terraform-security:
+    name: Terraform Security Scan
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.0
+
+      - name: Terraform Format Check
+        working-directory: terraform
+        run: terraform fmt -check -recursive
+        continue-on-error: true
+
+      - name: TFSec Security Scanner
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: terraform
+          soft_fail: true
+
+      - name: Checkov Security Scanner
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform
+          framework: terraform
+          soft_fail: true
+        continue-on-error: true
+
+  # Kubernetes Manifest Security
+  k8s-manifest-scan:
+    name: Kubernetes Manifest Security
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Kubesec Security Scanner
+        uses: controlplaneio/kubesec-action@v0.0.2
+        with:
+          input: k8s/
+        continue-on-error: true
+
+      - name: Datree K8s Policy Check
+        uses: datreeio/action-datree@main
+        with:
+          path: k8s/*.yaml
+          cliArguments: --only-k8s-files
+        env:
+          DATREE_TOKEN: ${{ secrets.DATREE_TOKEN }}
+        continue-on-error: true
+
+  # Security Summary
+  security-summary:
+    name: Security Scan Summary
+    needs: [code-quality, secret-scanning, dependency-scan, sast-codeql, container-scan, dockerfile-lint, terraform-security, k8s-manifest-scan]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Generate Security Summary
+        run: |
+          echo "## 🛡️ Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Scan Type | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Code Quality | ${{ needs.code-quality.result == 'success' && '✅ Passed' || '⚠️ Warning' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Secret Scanning | ${{ needs.secret-scanning.result == 'success' && '✅ Passed' || '⚠️ Warning' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dependency Scan | ${{ needs.dependency-scan.result == 'success' && '✅ Passed' || '⚠️ Warning' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| SAST (CodeQL) | ${{ needs.sast-codeql.result == 'success' && '✅ Passed' || '⚠️ Warning' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Container Security | ${{ needs.container-scan.result == 'success' && '✅ Passed' || '⚠️ Warning' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dockerfile Lint | ${{ needs.dockerfile-lint.result == 'success' && '✅ Passed' || '⚠️ Warning' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Terraform Security | ${{ needs.terraform-security.result == 'success' && '✅ Passed' || '⚠️ Warning' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| K8s Manifest Scan | ${{ needs.k8s-manifest-scan.result == 'success' && '✅ Passed' || '⚠️ Warning' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Scan Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY

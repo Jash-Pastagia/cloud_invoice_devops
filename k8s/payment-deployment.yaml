@@ -14,12 +14,12 @@ spec:
     spec:
       containers:
       - name: payment
-        image: your-dockerhub-username/payment-service:latest
+        image: techs129/innovative-ci-payment-service:latest
         ports:
         - containerPort: 6060  # Changed to browser-safe port
         envFrom:
         - secretRef:
-            name: jwt-secret
+            name: app-secrets
         env:
         - name: PORT
           value: "6060"
@@ -27,8 +27,6 @@ spec:
           value: "production"
         - name: INVOICE_URL
           value: "http://invoice-service:5050"
-        - name: KAFKA_BROKERS
-          value: "kafka:9092"
 ---
 apiVersion: v1
 kind: Service

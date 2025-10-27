@@ -3,30 +3,58 @@ kind: Ingress
 metadata:
   name: invoice-ingress
   annotations:
-    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
 spec:
+  ingressClassName: nginx
   rules:
-  - host: cloudinvoice.local
-    http:
+  - http:
       paths:
-      - path: /auth
-        pathType: Prefix
+      # Frontend - root path
+      - path: /()(.*)
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: frontend
+            port:
+              number: 80
+      # Auth API
+      - path: /api/auth(/|$)(.*)
+        pathType: ImplementationSpecific
         backend:
           service:
             name: auth-service
             port:
               number: 4000
-      - path: /invoice
-        pathType: Prefix
+      # Invoice API
+      - path: /api/invoice(/|$)(.*)
+        pathType: ImplementationSpecific
         backend:
           service:
             name: invoice-service
             port:
-              number: 5000
-      - path: /payment
-        pathType: Prefix
+              number: 5050
+      # Payment API
+      - path: /api/payment(/|$)(.*)
+        pathType: ImplementationSpecific
         backend:
           service:
             name: payment-service
             port:
-              number: 6000
+              number: 6060
+      # Notification API
+      - path: /api/notification(/|$)(.*)
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: notification-service
+            port:
+              number: 7200
+      # Analytics API
+      - path: /api/analytics(/|$)(.*)
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: analytics-service
+            port:
+              number: 7100

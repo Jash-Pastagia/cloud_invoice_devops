@@ -1,0 +1,179 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: seed-script
+  namespace: default
+  labels:
+    app: database
+    component: seed-data
+data:
+  seed-users.js: |
+    const { Pool } = require('pg');
+
+    // Database configuration
+    const pool = new Pool({
+      host: process.env.DB_HOST || 'postgresql',
+      port: process.env.DB_PORT || 5432,
+      database: process.env.DB_NAME || 'invoicedb',
+      user: process.env.DB_USER || 'postgres',
+      password: process.env.DB_PASSWORD || 'postgres',
+      ssl: false,
+      connectionTimeoutMillis: 30000,
+      idleTimeoutMillis: 30000,
+    });
+
+    // Demo users to create
+    const demoUsers = [
+      {
+        id: 'demo-user-id',
+        username: 'demo',
+        password: 'demo123',
+        fullName: 'Demo User',
+        email: 'demo@example.com'
+      },
+      {
+        id: 'user2-user-id',
+        username: 'user2',
+        password: 'user2123',
+        fullName: 'User Two',
+        email: 'user2@example.com'
+      }
+    ];
+
+    async function waitForDatabase() {
+      const maxRetries = 30;
+      const retryDelay = 2000; // 2 seconds
+      
+      for (let i = 0; i < maxRetries; i++) {
+        try {
+          console.log(`🔄 Attempting database connection (${i + 1}/${maxRetries})...`);
+          const client = await pool.connect();
+          
+          // Test the connection
+          await client.query('SELECT 1');
+          client.release();
+          
+          console.log('✅ Database connection successful!');
+          return true;
+        } catch (error) {
+          console.log(`❌ Connection failed: ${error.message}`);
+          if (i < maxRetries - 1) {
+            console.log(`⏳ Retrying in ${retryDelay/1000}s...`);
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+          }
+        }
+      }
+      
+      throw new Error('Failed to connect to database after maximum retries');
+    }
+
+    async function seedUsers() {
+      console.log('🌱 Starting Kubernetes seed data process...');
+      
+      try {
+        // Wait for database to be ready
+        await waitForDatabase();
+        
+        const client = await pool.connect();
+        
+        try {
+          console.log('🌱 Starting user seeding process...');
+          
+          // Verify users table exists
+          const tableCheck = await client.query(`
+            SELECT EXISTS (
+              SELECT FROM information_schema.tables 
+              WHERE table_schema = 'public' 
+              AND table_name = 'users'
+            );
+          `);
+          
+          if (!tableCheck.rows[0].exists) {
+            throw new Error('Users table does not exist. Run database migrations first.');
+          }
+          
+          console.log('✅ Users table verified');
+          
+          // Clear existing demo users (idempotent)
+          const deleteResult = await client.query(
+            'DELETE FROM users WHERE username IN ($1, $2)',
+            ['demo', 'user2']
+          );
+          console.log(`🗑️  Cleared ${deleteResult.rowCount} existing demo users`);
+          
+          // Create demo users
+          for (const user of demoUsers) {
+            console.log(`Creating user: ${user.username}...`);
+            
+            // Store plain text password (no hashing)
+            const passwordHash = user.password;
+            
+            const result = await client.query(`
+              INSERT INTO users (id, username, password_hash, full_name, email)
+              VALUES ($1, $2, $3, $4, $5)
+              ON CONFLICT (username) DO UPDATE SET
+                password_hash = EXCLUDED.password_hash,
+                full_name = EXCLUDED.full_name,
+                email = EXCLUDED.email,
+                updated_at = NOW()
+              RETURNING id, username, full_name, email, created_at
+            `, [user.id, user.username, passwordHash, user.fullName, user.email]);
+            
+            const createdUser = result.rows[0];
+            console.log(`✅ Created user: ${createdUser.username} (${createdUser.full_name})`);
+            console.log(`   ID: ${createdUser.id}`);
+            console.log(`   Email: ${createdUser.email}`);
+            console.log(`   Created: ${createdUser.created_at}`);
+            console.log('');
+          }
+          
+          // Verify users were created
+          const userCount = await client.query('SELECT COUNT(*) FROM users');
+          console.log(`📊 Total users in database: ${userCount.rows[0].count}`);
+          
+          // List all users
+          const allUsers = await client.query(
+            'SELECT id, username, full_name, email, created_at FROM users ORDER BY created_at'
+          );
+          
+          console.log('\n👥 All users in database:');
+          allUsers.rows.forEach((user, index) => {
+            console.log(`${index + 1}. ${user.username} (${user.full_name}) - ${user.email}`);
+            console.log(`   ID: ${user.id}`);
+          });
+          
+          console.log('\n🎉 User seeding completed successfully!');
+          console.log('\n📝 Login credentials:');
+          console.log('   Username: demo     | Password: demo123');
+          console.log('   Username: user2    | Password: user2123');
+          console.log('\n🔗 These credentials can be used in the frontend');
+          
+        } finally {
+          client.release();
+        }
+      } catch (error) {
+        console.error('❌ Error seeding users:', error);
+        process.exit(1);
+      } finally {
+        await pool.end();
+      }
+    }
+
+    // Run the seeding function
+    seedUsers().catch(error => {
+      console.error('❌ Fatal error:', error);
+      process.exit(1);
+    });
+  package.json: |
+    {
+      "name": "seed-data",
+      "version": "1.0.0",
+      "description": "Kubernetes seed data script",
+      "main": "seed-users.js",
+      "scripts": {
+        "start": "node seed-users.js"
+      },
+      "dependencies": {
+        "pg": "^8.11.3"
+      }
+    }

@@ -14,14 +14,12 @@ spec:
     spec:
       containers:
       - name: auth
-        image: your-dockerhub-username/auth-service:latest
+        image: techs129/innovative-ci-auth-service:latest
         ports:
         - containerPort: 4000
         envFrom:
         - secretRef:
-            name: jwt-secret
-        - secretRef:
-            name: db-secret
+            name: app-secrets
         env:
         - name: PORT
           value: "4000"

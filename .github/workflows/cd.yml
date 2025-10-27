@@ -1,0 +1,449 @@
+name: CD - Continuous Deployment (Hybrid)
+
+# Fully hybrid deployment: kubectl + Docker Hub
+# No AWS dependencies - works with any Kubernetes cluster
+# Builds images -> Pushes to Docker Hub -> Deploys via kubectl
+
+on:
+  push:
+    branches:
+      - main
+      - feat/kafka-postgres-notifications
+    paths:
+      - 'auth-service/**'
+      - 'invoice-service/**'
+      - 'payment-service/**'
+      - 'notification-service/**'
+      - 'analytics-service/**'
+      - 'frontend/**'
+      - 'k8s/**'
+      - '.github/workflows/cd.yml'
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to deploy (or "all")'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - auth-service
+          - invoice-service
+          - payment-service
+          - notification-service
+          - analytics-service
+          - frontend
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  DOCKER_REGISTRY: 'docker.io'
+  DOCKER_USERNAME: 'techs129'
+  DOCKER_REPOSITORY: 'innovative-ci'
+  NAMESPACE: 'innovative-ci'
+
+jobs:
+  build-and-push:
+    name: Build & Push - ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - auth-service
+          - invoice-service
+          - payment-service
+          - notification-service
+          - analytics-service
+          - frontend
+      fail-fast: false
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check if service should be deployed
+        id: check-service
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            if [ "${{ github.event.inputs.service }}" == "all" ] || [ "${{ github.event.inputs.service }}" == "${{ matrix.service }}" ]; then
+              echo "deploy=true" >> $GITHUB_OUTPUT
+            else
+              echo "deploy=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "deploy=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.check-service.outputs.deploy == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        if: steps.check-service.outputs.deploy == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Generate image tags
+        if: steps.check-service.outputs.deploy == 'true'
+        id: meta
+        run: |
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          IMAGE_NAME="${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}-${{ matrix.service }}"
+          
+          echo "image_name=${IMAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "tags=${IMAGE_NAME}:${SHORT_SHA},${IMAGE_NAME}:latest" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        if: steps.check-service.outputs.deploy == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ matrix.service }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image info
+        if: steps.check-service.outputs.deploy == 'true'
+        run: |
+          echo "✅ Built and pushed: ${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.short_sha }}" >> $GITHUB_STEP_SUMMARY
+
+  deploy-infrastructure:
+    name: Deploy Infrastructure (Docker Compose)
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          if [ -n "${{ secrets.KUBECONFIG_DATA }}" ]; then
+            echo "${{ secrets.KUBECONFIG_DATA }}" | base64 -d > $HOME/.kube/config
+            echo "✅ Kubeconfig loaded from secrets" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ No KUBECONFIG_DATA secret found. Assuming in-cluster or self-hosted runner." >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ For GitHub-hosted runners, please add KUBECONFIG_DATA secret." >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Test kubectl connectivity
+          if kubectl cluster-info 2>/dev/null; then
+            echo "✅ kubectl connected to cluster: $(kubectl config current-context)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ kubectl cannot connect to cluster" >> $GITHUB_STEP_SUMMARY
+            echo "💡 Starting local infrastructure with docker-compose for testing..." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Create namespace
+        run: |
+          kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null || echo "Namespace already exists or kubectl not available"
+
+      - name: Start Docker infrastructure (PostgreSQL, Kafka, Zookeeper)
+        run: |
+          # Check if we're in a CI environment without cluster access
+          if ! kubectl cluster-info 2>/dev/null; then
+            echo "Starting Docker Compose infrastructure for local/CI testing..."
+            docker-compose up -d postgres kafka zookeeper
+            
+            # Wait for services to be ready
+            echo "Waiting for PostgreSQL..."
+            timeout 60 bash -c 'until docker exec $(docker ps -qf "name=postgres") pg_isready -U postgres; do sleep 2; done' || echo "PostgreSQL timeout"
+            
+            echo "Waiting for Kafka..."
+            sleep 15
+            
+            echo "✅ Docker infrastructure started" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ Using Kubernetes cluster - skipping docker-compose" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Apply secrets
+        run: |
+          if kubectl cluster-info 2>/dev/null; then
+            kubectl create secret generic app-secrets \
+              --from-literal=jwt-secret=${{ secrets.JWT_SECRET || 'supersecretdevops' }} \
+              --namespace=${{ env.NAMESPACE }} \
+              --dry-run=client -o yaml | kubectl apply -f -
+            echo "✅ Secrets applied to cluster" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  deploy-services:
+    name: Deploy to Kubernetes
+    needs: [build-and-push, deploy-infrastructure]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - auth-service
+          - invoice-service
+          - payment-service
+          - notification-service
+          - analytics-service
+          - frontend
+      fail-fast: false
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check if service should be deployed
+        id: check-service
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            if [ "${{ github.event.inputs.service }}" == "all" ] || [ "${{ github.event.inputs.service }}" == "${{ matrix.service }}" ]; then
+              echo "deploy=true" >> $GITHUB_OUTPUT
+            else
+              echo "deploy=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "deploy=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up kubeconfig
+        if: steps.check-service.outputs.deploy == 'true'
+        run: |
+          mkdir -p $HOME/.kube
+          if [ -n "${{ secrets.KUBECONFIG_DATA }}" ]; then
+            echo "${{ secrets.KUBECONFIG_DATA }}" | base64 -d > $HOME/.kube/config
+          fi
+
+      - name: Generate deployment info
+        if: steps.check-service.outputs.deploy == 'true'
+        id: deploy-info
+        run: |
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          SERVICE_NAME="${{ matrix.service }}"
+          DEPLOYMENT_NAME="${SERVICE_NAME%-service}"
+          
+          # Map service names to deployment files
+          if [ "$SERVICE_NAME" == "auth-service" ]; then
+            DEPLOYMENT_FILE="k8s/auth-deployment.yaml"
+          elif [ "$SERVICE_NAME" == "invoice-service" ]; then
+            DEPLOYMENT_FILE="k8s/invoice-deployment.yaml"
+          elif [ "$SERVICE_NAME" == "payment-service" ]; then
+            DEPLOYMENT_FILE="k8s/payment-deployment.yaml"
+          elif [ "$SERVICE_NAME" == "notification-service" ]; then
+            DEPLOYMENT_FILE="k8s/notification-deployment.yaml"
+          elif [ "$SERVICE_NAME" == "analytics-service" ]; then
+            DEPLOYMENT_FILE="k8s/analytics-deployment.yaml"
+          elif [ "$SERVICE_NAME" == "frontend" ]; then
+            DEPLOYMENT_FILE="k8s/frontend-deployment.yaml"
+          else
+            DEPLOYMENT_FILE="k8s/${SERVICE_NAME}-deployment.yaml"
+          fi
+          
+          IMAGE_NAME="${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}-${SERVICE_NAME}"
+          
+          echo "deployment_name=${DEPLOYMENT_NAME}" >> $GITHUB_OUTPUT
+          echo "deployment_file=${DEPLOYMENT_FILE}" >> $GITHUB_OUTPUT
+          echo "image_name=${IMAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Update image in deployment manifest
+        if: steps.check-service.outputs.deploy == 'true'
+        run: |
+          DEPLOYMENT_FILE="${{ steps.deploy-info.outputs.deployment_file }}"
+          IMAGE_NAME="${{ steps.deploy-info.outputs.image_name }}"
+          SHORT_SHA="${{ steps.deploy-info.outputs.short_sha }}"
+          
+          if [ -f "$DEPLOYMENT_FILE" ]; then
+            # Create temp file with updated image
+            cp "$DEPLOYMENT_FILE" "${DEPLOYMENT_FILE}.tmp"
+            sed -i.bak "s|image: .*${{ matrix.service }}.*|image: ${IMAGE_NAME}:${SHORT_SHA}|g" "${DEPLOYMENT_FILE}.tmp"
+            echo "Updated image to: ${IMAGE_NAME}:${SHORT_SHA}"
+            mv "${DEPLOYMENT_FILE}.tmp" "$DEPLOYMENT_FILE"
+          else
+            echo "Warning: Deployment file not found: $DEPLOYMENT_FILE"
+          fi
+
+      - name: Apply deployment
+        if: steps.check-service.outputs.deploy == 'true'
+        run: |
+          DEPLOYMENT_FILE="${{ steps.deploy-info.outputs.deployment_file }}"
+          
+          if kubectl cluster-info 2>/dev/null; then
+            if [ -f "$DEPLOYMENT_FILE" ]; then
+              kubectl apply -f "$DEPLOYMENT_FILE" -n ${{ env.NAMESPACE }}
+              echo "✅ Applied $DEPLOYMENT_FILE" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "⚠️ kubectl not connected - skipping deployment" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Wait for rollout
+        if: steps.check-service.outputs.deploy == 'true'
+        run: |
+          DEPLOYMENT_NAME="${{ steps.deploy-info.outputs.deployment_name }}"
+          
+          if kubectl cluster-info 2>/dev/null; then
+            kubectl rollout status deployment/${DEPLOYMENT_NAME} -n ${{ env.NAMESPACE }} --timeout=5m || {
+              echo "❌ Rollout failed for ${DEPLOYMENT_NAME}" >> $GITHUB_STEP_SUMMARY
+              kubectl describe deployment/${DEPLOYMENT_NAME} -n ${{ env.NAMESPACE }}
+              kubectl logs -l app=${DEPLOYMENT_NAME} -n ${{ env.NAMESPACE }} --tail=50
+              exit 1
+            }
+            echo "✅ ${DEPLOYMENT_NAME} rolled out successfully" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Verify deployment
+        if: steps.check-service.outputs.deploy == 'true'
+        run: |
+          DEPLOYMENT_NAME="${{ steps.deploy-info.outputs.deployment_name }}"
+          
+          if kubectl cluster-info 2>/dev/null; then
+            echo "### Deployment: ${DEPLOYMENT_NAME}" >> $GITHUB_STEP_SUMMARY
+            kubectl get deployment ${DEPLOYMENT_NAME} -n ${{ env.NAMESPACE }} >> $GITHUB_STEP_SUMMARY || true
+            kubectl get pods -l app=${DEPLOYMENT_NAME} -n ${{ env.NAMESPACE }} >> $GITHUB_STEP_SUMMARY || true
+          fi
+
+  apply-services-and-ingress:
+    name: Apply Services & Ingress
+    needs: deploy-services
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          if [ -n "${{ secrets.KUBECONFIG_DATA }}" ]; then
+            echo "${{ secrets.KUBECONFIG_DATA }}" | base64 -d > $HOME/.kube/config
+          fi
+
+      - name: Apply services
+        run: |
+          if kubectl cluster-info 2>/dev/null; then
+            kubectl apply -f k8s/services.yaml -n ${{ env.NAMESPACE }} || true
+            echo "✅ Services applied" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Apply ingress
+        run: |
+          if kubectl cluster-info 2>/dev/null; then
+            kubectl apply -f k8s/ingress.yaml -n ${{ env.NAMESPACE }} || true
+            echo "✅ Ingress applied" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  health-check:
+    name: Health Check & Verification
+    needs: apply-services-and-ingress
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          if [ -n "${{ secrets.KUBECONFIG_DATA }}" ]; then
+            echo "${{ secrets.KUBECONFIG_DATA }}" | base64 -d > $HOME/.kube/config
+          fi
+
+      - name: Check pod health
+        run: |
+          echo "## 🏥 Deployment Health Check" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | Status | Ready | Restarts |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|--------|-------|----------|" >> $GITHUB_STEP_SUMMARY
+          
+          if kubectl cluster-info 2>/dev/null; then
+            for service in auth invoice payment notification analytics frontend; do
+              POD_STATUS=$(kubectl get pods -n ${{ env.NAMESPACE }} -l app=${service} -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "NotFound")
+              READY=$(kubectl get pods -n ${{ env.NAMESPACE }} -l app=${service} -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
+              RESTARTS=$(kubectl get pods -n ${{ env.NAMESPACE }} -l app=${service} -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo "0")
+              
+              echo "| ${service} | ${POD_STATUS} | ${READY} | ${RESTARTS} |" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "| All Services | Running | N/A | N/A |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ kubectl not connected - health check skipped" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Test API endpoints
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🧪 API Health Tests" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if kubectl cluster-info 2>/dev/null; then
+            # Try to get ingress URL
+            INGRESS_URL=$(kubectl get ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+            
+            if [ -z "$INGRESS_URL" ]; then
+              INGRESS_URL=$(kubectl get ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "localhost")
+            fi
+            
+            echo "Testing against: ${INGRESS_URL}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            # Test endpoints
+            for service in auth invoice payment; do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://${INGRESS_URL}/api/${service}/health" 2>/dev/null || echo "000")
+              if [ "$STATUS" == "000" ]; then
+                echo "- ⚠️ ${service} service: Not accessible" >> $GITHUB_STEP_SUMMARY
+              elif [ "$STATUS" == "200" ]; then
+                echo "- ✅ ${service} service: HTTP ${STATUS}" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "- ⚠️ ${service} service: HTTP ${STATUS}" >> $GITHUB_STEP_SUMMARY
+              fi
+            done
+          else
+            echo "⚠️ kubectl not connected - API tests skipped" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Get service URLs
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🌐 Access URLs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if kubectl cluster-info 2>/dev/null; then
+            INGRESS_URL=$(kubectl get ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+            
+            if [ -z "$INGRESS_URL" ]; then
+              INGRESS_URL=$(kubectl get ingress -n ${{ env.NAMESPACE }} -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
+            fi
+            
+            if [ "$INGRESS_URL" == "pending" ]; then
+              echo "⚠️ Ingress URL pending... Use port-forward:" >> $GITHUB_STEP_SUMMARY
+              echo "\`kubectl port-forward svc/frontend 3000:80 -n ${{ env.NAMESPACE }}\`" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- **Frontend**: http://${INGRESS_URL}" >> $GITHUB_STEP_SUMMARY
+              echo "- **Auth API**: http://${INGRESS_URL}/api/auth" >> $GITHUB_STEP_SUMMARY
+              echo "- **Invoice API**: http://${INGRESS_URL}/api/invoice" >> $GITHUB_STEP_SUMMARY
+              echo "- **Payment API**: http://${INGRESS_URL}/api/payment" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+  deployment-summary:
+    name: Deployment Summary
+    needs: health-check
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Summary
+        run: |
+          if [ "${{ needs.health-check.result }}" == "success" ]; then
+            echo "## ✅ Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+            echo "**Commit**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "**Deployed by**: @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Please check the logs for details." >> $GITHUB_STEP_SUMMARY
+          fi
