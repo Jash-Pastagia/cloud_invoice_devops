@@ -14,7 +14,7 @@ COPY notification-service/ ./
 COPY lib/ ./lib/
 
 # Expose port and set environment
-EXPOSE 7000
-ENV PORT=7000
+EXPOSE 7200
+ENV PORT=7200
 
 CMD ["node", "index.js"]
